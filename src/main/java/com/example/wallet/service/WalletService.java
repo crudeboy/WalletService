@@ -1,12 +1,17 @@
 package com.example.wallet.service;
 
+import com.example.wallet.dto.TransferResponse;
+import com.example.wallet.dto.WalletResponse;
 import com.example.wallet.entity.Transaction;
 import com.example.wallet.entity.Wallet;
+import com.example.wallet.exception.InsufficientBalanceException;
+import com.example.wallet.exception.WalletNotFoundException;
 import com.example.wallet.repository.TransactionRepository;
 import com.example.wallet.repository.WalletRepository;
 import com.example.wallet.type.TransactionType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -20,22 +25,37 @@ public class WalletService {
     private final WalletRepository walletRepository;
     private final TransactionRepository transactionRepository;
 
-    public Wallet createWallet() {
+    public WalletResponse createWallet() {
+        log.info("Wallet creation request received.");
         Wallet wallet = new Wallet();
         wallet.setBalance(0L); // initial balance in minor units
-        return walletRepository.save(wallet);
+        Wallet saved = walletRepository.save(wallet);
+
+        log.info("Wallet created [walletId={}, balance={}]",
+                saved.getId(), saved.getBalance());
+
+        return WalletResponse.fromEntity(saved);
     }
 
     @Transactional
-    public Wallet creditWallet(Long walletId, Long amount, String idempotencyKey) {
-        Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
+    public WalletResponse creditWallet(Long walletId, Long amount, String idempotencyKey) {
+
+        log.info("Credit request received [walletId={}, amount={}, idempotencyKey={}]",
+                walletId, amount, idempotencyKey);
+
+        Optional<Transaction> existing =
+                transactionRepository.findByIdempotencyKey(idempotencyKey);
+
         if (existing.isPresent()) {
-            return existing.get().getWallet(); // idempotency: return previous result
+            log.info("Idempotent credit hit [idempotencyKey={}, walletId={}]",
+                    idempotencyKey, walletId);
+            return WalletResponse.fromEntity(existing.get().getWallet());
         }
 
-        Wallet wallet = walletRepository.findByIdForUpdate(walletId);
-        wallet.setBalance(wallet.getBalance() + amount);
-        walletRepository.save(wallet);
+        Wallet wallet = applyCredit(walletId, amount);
+
+        log.info("Wallet credited [walletId={}, newBalance={}]",
+                walletId, wallet.getBalance());
 
         Transaction tx = new Transaction();
         tx.setWallet(wallet);
@@ -44,24 +64,25 @@ public class WalletService {
         tx.setIdempotencyKey(idempotencyKey);
         transactionRepository.save(tx);
 
-        return wallet;
+        return WalletResponse.fromEntity(wallet);
     }
 
     @Transactional
-    public Wallet debitWallet(Long walletId, Long amount, String idempotencyKey) {
-        Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
+    public WalletResponse debitWallet(Long walletId, Long amount, String idempotencyKey) {
+
+        Optional<Transaction> existing =
+                transactionRepository.findByIdempotencyKey(idempotencyKey);
+
         if (existing.isPresent()) {
-            return existing.get().getWallet();
+            log.info("Idempotent debit hit [idempotencyKey={}, walletId={}]",
+                    idempotencyKey, walletId);
+            return WalletResponse.fromEntity(existing.get().getWallet());
         }
 
-        Wallet wallet = walletRepository.findByIdForUpdate(walletId);
+        Wallet wallet = applyDebit(walletId, amount);
 
-        if (wallet.getBalance() < amount) {
-            throw new RuntimeException("Insufficient balance");
-        }
-
-        wallet.setBalance(wallet.getBalance() - amount);
-        walletRepository.save(wallet);
+        log.info("Wallet debited [walletId={}, newBalance={}]",
+                walletId, wallet.getBalance());
 
         Transaction tx = new Transaction();
         tx.setWallet(wallet);
@@ -70,28 +91,28 @@ public class WalletService {
         tx.setIdempotencyKey(idempotencyKey);
         transactionRepository.save(tx);
 
-        return wallet;
+        return WalletResponse.fromEntity(wallet);
     }
 
+
     @Transactional
-    public void transfer(Long fromWalletId, Long toWalletId, Long amount, String idempotencyKey) {
-        Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
+    public TransferResponse transfer(Long fromWalletId, Long toWalletId, Long amount, String idempotencyKey) {
+
+        log.info("Transfer initiated [fromWallet={}, toWallet={}, amount={}, idempotencyKey={}]",
+                fromWalletId, toWalletId, amount, idempotencyKey);
+
+        Optional<Transaction> existing =
+                transactionRepository.findByIdempotencyKey(idempotencyKey);
+
         if (existing.isPresent()) {
-            return; // idempotency
+            return TransferResponse.fromTransaction(existing.get());
         }
 
-        Wallet sender = walletRepository.findByIdForUpdate(fromWalletId);
-        Wallet receiver = walletRepository.findByIdForUpdate(toWalletId);
+        Wallet sender = applyDebit(fromWalletId, amount);
+        Wallet receiver = applyCredit(toWalletId, amount);
 
-        if (sender.getBalance() < amount) {
-            throw new RuntimeException("Insufficient balance");
-        }
-
-        sender.setBalance(sender.getBalance() - amount);
-        receiver.setBalance(receiver.getBalance() + amount);
-
-        walletRepository.save(sender);
-        walletRepository.save(receiver);
+        log.info("Transfer completed [fromWallet={}, toWallet={}, amount={}]",
+                fromWalletId, toWalletId, amount);
 
         Transaction tx = new Transaction();
         tx.setWallet(sender);
@@ -99,11 +120,62 @@ public class WalletService {
         tx.setAmount(amount);
         tx.setType(TransactionType.TRANSFER);
         tx.setIdempotencyKey(idempotencyKey);
-        transactionRepository.save(tx);
+
+        try {
+            Transaction transaction = transactionRepository.save(tx);
+            return TransferResponse.fromTransaction(transaction);
+        } catch (DataIntegrityViolationException e) {
+            // Someone else already processed this request
+            log.warn("Duplicate idempotency key detected, returning existing transaction [idempotencyKey={}]",
+                    tx.getIdempotencyKey(), e);
+
+            // Fetch the original transaction to return
+            Transaction existingTx = transactionRepository
+                    .findByIdempotencyKey(tx.getIdempotencyKey())
+                    .orElseThrow(() -> new RuntimeException(
+                            "Unexpected error fetching existing transaction for idempotencyKey=" + tx.getIdempotencyKey()
+                    ));
+
+            return TransferResponse.fromTransaction(existingTx);
+        }
     }
 
-    public Wallet get(Long walletId) {
-        return walletRepository.findById(walletId)
-                .orElseThrow(() -> new RuntimeException("Wallet not found"));
+    public WalletResponse get(Long walletId) {
+        log.info("Retrieving Wallet info for : {}", walletId);
+        Wallet wallet = walletRepository.findById(walletId)
+                .orElseThrow(() ->
+                        new WalletNotFoundException(walletId));
+        return WalletResponse.fromEntity(wallet);
     }
+
+    private Wallet applyCredit(Long walletId, Long amount) {
+        Wallet wallet = walletRepository.findByIdForUpdate(walletId);
+        if (wallet == null) {
+            throw new WalletNotFoundException(walletId);
+        }
+
+        wallet.setBalance(wallet.getBalance() + amount);
+        return walletRepository.save(wallet);
+    }
+
+    private Wallet applyDebit(Long walletId, Long amount) {
+        Wallet wallet = walletRepository.findByIdForUpdate(walletId);
+        if (wallet == null) {
+            throw new WalletNotFoundException(walletId);
+        }
+
+        if (wallet.getBalance() < amount) {
+            log.warn("Insufficient balance [walletId={}, balance={}, requested={}]",
+                    wallet.getId(), wallet.getBalance(), amount);
+            throw new InsufficientBalanceException(
+                    wallet.getId(),
+                    wallet.getBalance(),
+                    amount
+            );
+        }
+
+        wallet.setBalance(wallet.getBalance() - amount);
+        return walletRepository.save(wallet);
+    }
+
 }
