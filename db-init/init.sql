@@ -1,0 +1,12 @@
+---- create role and grant privileges
+--DO
+--$do$
+--BEGIN
+--   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'walletuser') THEN
+--      CREATE ROLE walletuser WITH LOGIN PASSWORD 'walletpass';
+--   END IF;
+--END
+--$do$;
+--
+---- grant privileges on the DB
+--GRANT ALL PRIVILEGES ON DATABASE walletdb TO walletuser;

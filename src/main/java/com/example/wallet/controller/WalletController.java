@@ -11,7 +11,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
-@RequestMapping("/wallets")
+@RequestMapping("api/v1/wallets")
 @RequiredArgsConstructor
 public class WalletController {
 
@@ -22,7 +22,7 @@ public class WalletController {
         return walletService.createWallet();
     }
 
-    @PostMapping("/{id}/credit")
+    @PostMapping("/{id:\\d+}/credit")
     public WalletResponse credit(
             @PathVariable @Min(value = 1, message = "Wallet ID must be positive") Long id,
             @Valid @RequestBody WalletTransactionRequest request
@@ -30,7 +30,7 @@ public class WalletController {
         return walletService.creditWallet(id, request.amount(), request.idempotencyKey());
     }
 
-    @PostMapping("/{id}/debit")
+    @PostMapping("/{id:\\d+}/debit")
     public WalletResponse debit(
             @PathVariable Long id,
             @Valid @RequestBody WalletTransactionRequest request
@@ -50,7 +50,7 @@ public class WalletController {
         );
     }
 
-    @GetMapping("/{id}")
+    @GetMapping("/{id:\\d+}")
     public WalletResponse getWallet(@PathVariable @Min(value = 1, message = "Wallet ID must be positive") Long id) {
         return walletService.get(id);
     }

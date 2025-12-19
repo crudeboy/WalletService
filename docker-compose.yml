@@ -1,0 +1,31 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15
+    container_name: wallet-db
+    environment:
+      POSTGRES_USER: walletuser
+      POSTGRES_PASSWORD: walletpass
+      POSTGRES_DB: walletdb
+    ports:
+      - "5434:5432"
+    volumes:
+      - wallet-data:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d
+
+
+  app:
+    build: .
+    container_name: wallet-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/walletdb
+      SPRING_DATASOURCE_USERNAME: walletuser
+      SPRING_DATASOURCE_PASSWORD: walletpass
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+volumes:
+  wallet-data:
