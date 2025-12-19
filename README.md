@@ -12,6 +12,7 @@ This project was implemented as an interview coding task, with emphasis on corre
 - [Database Initialization](#database-initialization)
 - [Error Handling](#error-handling)
 - [Testing Notes](#testing-notes)
+- [Possible Enhancements / Next Steps](#possible-enhancements--next-steps)
 
   
 ---  
@@ -277,6 +278,41 @@ The provided cURL examples allow easy manual verification of:
 - Validation failures
 - Idempotent retries
 - Concurrent-safe behavior
+
+
+## Possible Enhancements / Next Steps
+
+This implementation focuses on correctness, transactional safety, and
+idempotency, as required for the exercise. In a production environment,
+the following enhancements would be natural next steps:
+
+- **Authentication & Authorization**
+  - Secure endpoints using JWT or OAuth2
+  - Wallet access scoped per authenticated user
+
+- **Optimistic Locking (optional)**
+  - Currently, pessimistic locks ensure balance consistency.
+  - Optimistic locking (`@Version`) could be introduced for high-concurrency environments
+    where the risk of conflicts is low, reducing lock contention.
+
+- **Pagination & Query APIs**
+  - Add paginated transaction history endpoints
+  - Support filtering by date range and transaction type
+
+- **Observability**
+  - Metrics (e.g. Micrometer + Prometheus)
+  - Distributed tracing for transaction flows
+
+- **Resilience & Scalability**
+  - Database connection pool tuning
+  - Rate limiting and request throttling
+  - Read replicas for non-mutating queries
+
+- **Schema Migrations**
+  - Introduce Flyway or Liquibase for controlled schema evolution
+
+These were intentionally kept out of scope to maintain clarity and focus
+for the interview task.
 
 
 ### Summary
