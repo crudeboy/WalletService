@@ -8,12 +8,10 @@ import com.example.wallet.exception.InsufficientBalanceException;
 import com.example.wallet.exception.WalletNotFoundException;
 import com.example.wallet.repository.TransactionRepository;
 import com.example.wallet.repository.WalletRepository;
-import com.example.wallet.service.Payment.Payment;
 import com.example.wallet.type.TransactionType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -22,12 +20,13 @@ import java.util.Optional;
 @Service
 @Slf4j
 @RequiredArgsConstructor
-public class WalletService {
+public class WalletService2 {
 
     private final WalletRepository walletRepository;
     private final TransactionRepository transactionRepository;
     private final WalletEventProducer walletEventProducer;
-    private final Payment payment;
+    private final ApplicationEventPublisher eventPublisher; // Spring event publisher
+
 
     public WalletResponse createWallet() {
         log.info("Wallet creation request received.");
@@ -35,22 +34,22 @@ public class WalletService {
         wallet.setBalance(0L); // initial balance in minor units
         Wallet saved = walletRepository.save(wallet);
 
-        log.info("Wallet created [walletId={}, balance={}]", saved.getId(), saved.getBalance());
+        log.info("Wallet created [walletId={}, balance={}]",
+                saved.getId(), saved.getBalance());
+
         return WalletResponse.fromEntity(saved);
     }
 
     @Transactional
     public WalletResponse creditWallet(Long walletId, Long amount, String idempotencyKey) {
-        log.info("Credit request received [walletId={}, amount={}, idempotencyKey={}]", walletId, amount, idempotencyKey);
+        Optional<Transaction> existing =
+                transactionRepository.findByIdempotencyKey(idempotencyKey);
 
-        Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
         if (existing.isPresent()) {
-            log.info("Idempotent credit hit [idempotencyKey={}, walletId={}]", idempotencyKey, walletId);
             return WalletResponse.fromEntity(existing.get().getWallet());
         }
 
         Wallet wallet = applyCredit(walletId, amount);
-        log.info("Wallet credited [walletId={}, newBalance={}]", walletId, wallet.getBalance());
 
         Transaction tx = new Transaction();
         tx.setWallet(wallet);
@@ -59,19 +58,22 @@ public class WalletService {
         tx.setIdempotencyKey(idempotencyKey);
         transactionRepository.save(tx);
 
+        // Publish domain event
+        eventPublisher.publishEvent(new WalletEvent(walletId, null, amount, "CREDIT"));
+
         return WalletResponse.fromEntity(wallet);
     }
 
     @Transactional
     public WalletResponse debitWallet(Long walletId, Long amount, String idempotencyKey) {
-        Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
+        Optional<Transaction> existing =
+                transactionRepository.findByIdempotencyKey(idempotencyKey);
+
         if (existing.isPresent()) {
-            log.info("Idempotent debit hit [idempotencyKey={}, walletId={}]", idempotencyKey, walletId);
             return WalletResponse.fromEntity(existing.get().getWallet());
         }
 
         Wallet wallet = applyDebit(walletId, amount);
-        log.info("Wallet debited [walletId={}, newBalance={}]", walletId, wallet.getBalance());
 
         Transaction tx = new Transaction();
         tx.setWallet(wallet);
@@ -80,14 +82,18 @@ public class WalletService {
         tx.setIdempotencyKey(idempotencyKey);
         transactionRepository.save(tx);
 
+        // Publish domain event
+        eventPublisher.publishEvent(new WalletEvent(walletId, null, amount, "DEBIT"));
+
         return WalletResponse.fromEntity(wallet);
     }
 
+
     @Transactional
     public TransferResponse transfer(Long fromWalletId, Long toWalletId, Long amount, String idempotencyKey) {
-        log.info("Transfer initiated [fromWallet={}, toWallet={}, amount={}, idempotencyKey={}]", fromWalletId, toWalletId, amount, idempotencyKey);
+        Optional<Transaction> existing =
+                transactionRepository.findByIdempotencyKey(idempotencyKey);
 
-        Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
         if (existing.isPresent()) {
             return TransferResponse.fromTransaction(existing.get());
         }
@@ -95,83 +101,47 @@ public class WalletService {
         Wallet sender = applyDebit(fromWalletId, amount);
         Wallet receiver = applyCredit(toWalletId, amount);
 
-        log.info("Transfer completed [fromWallet={}, toWallet={}, amount={}]", fromWalletId, toWalletId, amount);
-
         Transaction tx = new Transaction();
         tx.setWallet(sender);
         tx.setRelatedWallet(receiver);
         tx.setAmount(amount);
         tx.setType(TransactionType.TRANSFER);
         tx.setIdempotencyKey(idempotencyKey);
+        transactionRepository.save(tx);
 
-        try {
-            Transaction transaction = transactionRepository.save(tx);
-            walletEventProducer.publishWalletEvent(
-                    WalletEventProducer.TOPIC,
-                    WalletEventProducer.createTransferEventString(fromWalletId, toWalletId, amount)
-            );
-            return TransferResponse.fromTransaction(transaction);
-        } catch (DataIntegrityViolationException e) {
-            log.warn("Duplicate idempotency key detected, returning existing transaction [idempotencyKey={}]", tx.getIdempotencyKey(), e);
+        // Publish transfer event
+        eventPublisher.publishEvent(new WalletEvent(fromWalletId, toWalletId, amount, "TRANSFER"));
 
-            Transaction existingTx = transactionRepository.findByIdempotencyKey(tx.getIdempotencyKey())
-                    .orElseThrow(() -> new RuntimeException(
-                            "Unexpected error fetching existing transaction for idempotencyKey=" + tx.getIdempotencyKey()
-                    ));
-
-            return TransferResponse.fromTransaction(existingTx);
-        }
+        return TransferResponse.fromTransaction(tx);
     }
 
     public WalletResponse get(Long walletId) {
         log.info("Retrieving Wallet info for : {}", walletId);
         Wallet wallet = walletRepository.findById(walletId)
-                .orElseThrow(() -> new WalletNotFoundException(walletId));
+                .orElseThrow(() ->
+                        new WalletNotFoundException(walletId));
         return WalletResponse.fromEntity(wallet);
     }
 
+    // applyCredit / applyDebit just update DB
     private Wallet applyCredit(Long walletId, Long amount) {
         Wallet wallet = walletRepository.findByIdForUpdate(walletId);
-        if (wallet == null) {
-            throw new WalletNotFoundException(walletId);
-        }
+        if (wallet == null) throw new WalletNotFoundException(walletId);
 
         wallet.setBalance(wallet.getBalance() + amount);
-        wallet = walletRepository.save(wallet);
-
-        // Publish event AFTER state change
-        walletEventProducer.publishWalletEvent(
-                WalletEventProducer.TOPIC,
-                WalletEventProducer.createEventString(walletId, amount, TransactionType.CREDIT.toString())
-        );
-
-        return wallet;
+        return walletRepository.save(wallet);
     }
 
     private Wallet applyDebit(Long walletId, Long amount) {
         Wallet wallet = walletRepository.findByIdForUpdate(walletId);
-        if (wallet == null) {
-            throw new WalletNotFoundException(walletId);
-        }
+        if (wallet == null) throw new WalletNotFoundException(walletId);
 
         if (wallet.getBalance() < amount) {
-            log.warn("Insufficient balance [walletId={}, balance={}, requested={}]", wallet.getId(), wallet.getBalance(), amount);
-            throw new InsufficientBalanceException(wallet.getId(), wallet.getBalance(), amount);
+            throw new InsufficientBalanceException(walletId, wallet.getBalance(), amount);
         }
 
         wallet.setBalance(wallet.getBalance() - amount);
-        wallet = walletRepository.save(wallet);
-
-        // Publish event AFTER state change
-        walletEventProducer.publishWalletEvent(
-                WalletEventProducer.TOPIC,
-                WalletEventProducer.createEventString(walletId, amount, TransactionType.DEBIT.toString())
-        );
-
-        return wallet;
+        return walletRepository.save(wallet);
     }
 
-    public void makePayment(){
-        payment.pay();
-    }
 }

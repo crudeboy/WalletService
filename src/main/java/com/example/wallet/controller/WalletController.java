@@ -4,6 +4,7 @@ import com.example.wallet.dto.TransferRequest;
 import com.example.wallet.dto.TransferResponse;
 import com.example.wallet.dto.WalletResponse;
 import com.example.wallet.dto.WalletTransactionRequest;
+import com.example.wallet.service.WalletEventProducer;
 import com.example.wallet.service.WalletService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
@@ -16,6 +17,16 @@ import org.springframework.web.bind.annotation.*;
 public class WalletController {
 
     private final WalletService walletService;
+    private final WalletEventProducer walletEventProducer;
+
+    @PostMapping("/debug/kafka")
+    public void debugKafka() {
+        walletEventProducer.publishWalletEvent(
+                "wallet-transactions",
+                "{\"test\": \"hello\"}"
+        );
+    }
+
 
     @PostMapping
     public WalletResponse createWallet() {
